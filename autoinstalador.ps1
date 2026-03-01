@@ -1,8 +1,8 @@
 # ============================================================
 #  AUTOINSTALADOR 100NOME — Windows
-#  Copyright (C) 2024  João Frade
+#  Copyright (C) 2026  João Frade
 #  Licenciado sob a GNU General Public License v3.0
-#  https://100nome.codeberg.page
+#  https://100nome.netlify.app
 # ============================================================
 
 #Requires -Version 5.1
@@ -10,7 +10,7 @@
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ── Constantes ───────────────────────────────────────────────
-$SCRIPT_VERSION     = "1.6.0"
+$SCRIPT_VERSION     = "2.0"
 $SP_FOLDER          = "_100NOME"
 $PACK_START         = "Pacote 100Nome"
 $PACK_DEFAULT       = "pacote normal"
@@ -19,7 +19,7 @@ $FILE_HELP          = "INSTALAR.html"
 $FILE_CONFIG        = ".autoinstalacao"
 $BACKUP_PATH        = "$SP_FOLDER\original"
 $BACKUP_PARTIAL     = " - parcial"
-$SITE_BASE          = "https://100nome.codeberg.page"
+$SITE_BASE          = "https://100nome.netlify.app"
 $DISCORD_URL        = "https://discord.gg/Xv7ax2VkEp"
 
 # ── Variáveis de estado ───────────────────────────────────────
