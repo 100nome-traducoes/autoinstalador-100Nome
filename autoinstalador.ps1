@@ -6,6 +6,10 @@
 # ============================================================
 
 #Requires -Version 5.1
+param(
+    [string]$Root = ""   # Raiz do ZIP — passada pelo wrapper instalar.ps1
+)
+
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
@@ -1142,8 +1146,14 @@ function Main-Menu {
 # ════════════════════════════════════════════════════════════
 
 # Muda para o diretório do script
-$script:SCRIPT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
-Set-Location $SCRIPT_DIR
+# Resolve SCRIPT_DIR — raiz do ZIP onde estão os Pacotes 100Nome
+if ($Root) {
+    $script:SCRIPT_DIR = $Root
+} else {
+    # Fallback: executado directamente — usa o directório do próprio script
+    $script:SCRIPT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+Set-Location $script:SCRIPT_DIR
 
 # Carrega configuração base
 if (-not (Load-Variables)) {

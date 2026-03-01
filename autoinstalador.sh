@@ -1398,9 +1398,22 @@ main_menu() {
 main() {
     check_root
 
-    # Muda para o diretório do script
-    cd "$(dirname "$0")" || exit 1
-    SCRIPT_DIR="$(pwd)"   # guarda o diretório base — pwd muda durante a pesquisa
+    # Processa --root (passado pelo wrapper instalar.sh)
+    # Se ausente, usa o diretório do próprio script como fallback
+    local pack_root=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --root) pack_root="$2"; shift 2 ;;
+            *) break ;;
+        esac
+    done
+
+    if [[ -n "$pack_root" ]]; then
+        cd "$pack_root" || exit 1
+    else
+        cd "$(dirname "$0")" || exit 1
+    fi
+    SCRIPT_DIR="$(pwd)"   # raiz do ZIP — onde estão os Pacotes 100Nome
 
     # Carrega configuração base
     if ! load_variables; then
