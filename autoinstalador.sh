@@ -911,7 +911,7 @@ end_menu() {
                     gap
 
                     # Abre a página do jogo em background enquanto o jogo lança
-                    [[ -n "$urlEnd" ]] && _open_file "${SITE_BASE}/${urlEnd}" &
+                    [[ -n "$urlEnd" ]] && _open_file "${SITE_BASE}/${urlEnd}?source=installer&played=1&os=linux" &
 
                     # Corre o jogo — bloqueia até o utilizador fechar
                     if [[ -x "${exeDir}${fileName}" ]]; then
@@ -950,7 +950,7 @@ end_menu() {
                 gap
                 if [[ $installed -eq 1 && -n "$urlEnd" ]]; then
                     msg_gray "A abrir página do jogo no site 100Nome..."
-                    _open_file "${SITE_BASE}/${urlEnd}"
+                    _open_file "${SITE_BASE}/${urlEnd}?source=installer&installed=1&os=linux"
                 fi
                 gap
                 msg_ok "Obrigado por usares o 100Nome. Boa sorte!"
