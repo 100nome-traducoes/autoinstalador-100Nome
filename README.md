@@ -1,2 +1,2 @@
-# autoinstalador-100Nome
-Autoinstalador usado para as traduções do 100Nome.
+# Autoinstalador do 100Nome
+Instalador usado para nos pacotes de tradução do 100Nome.
