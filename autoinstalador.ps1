@@ -2,7 +2,7 @@
 #  AUTOINSTALADOR 100NOME — Windows
 #  Copyright (C) 2026  João Frade
 #  Licenciado sob a GNU General Public License v3.0
-#  https://100nome.netlify.app
+#  https://100nome.net
 # ============================================================
 
 #Requires -Version 5.1
@@ -14,7 +14,7 @@ param(
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ── Constantes ───────────────────────────────────────────────
-$SCRIPT_VERSION     = "2.0.1"
+$SCRIPT_VERSION     = "2.1.0"
 $SP_FOLDER          = "_100NOME"
 $PACK_START         = "Pacote 100Nome"
 $PACK_DEFAULT       = "pacote normal"
@@ -23,21 +23,23 @@ $FILE_HELP          = "INSTALAR.html"
 $FILE_CONFIG        = ".autoinstalacao"
 $BACKUP_PATH        = "$SP_FOLDER\original"
 $BACKUP_PARTIAL     = " - parcial"
-$SITE_BASE          = "https://100nome.netlify.app"
+$SITE_BASE          = "https://100nome.net"
 $DISCORD_URL        = "https://discord.gg/Xv7ax2VkEp"
 
 # ── Variáveis de estado ───────────────────────────────────────
 $gameName           = ""
-$fileName           = ""
+$fileNameWin        = @()   # array de nomes de executável Windows
 $baseUpLevels       = 0
-$expectedFiles      = ""
-$expectedDirs       = ""
-$filesForRemoval    = ""
+$expectedFiles      = @()
+$expectedDirs       = @()
+$filesForRemoval    = @()
+$fileEdit           = @()   # array de edições declarativas de ficheiros
 $urlEnd             = ""
 $trLicenseFileName  = ""
 $packName           = ""
 $exeDir             = ""
 $gameDir            = ""
+$resolvedExeName    = ""    # executável efectivamente encontrado
 $packList           = @()
 $dirsToSearch       = @("C:\", "C:\Program Files", "C:\Program Files (x86)",
                         "C:\Games", "D:\", "D:\Games", "D:\SteamLibrary",
@@ -107,7 +109,7 @@ function Write-Prompt {
 
 function Press-AnyKey {
     Write-Gap
-    Write-Host "  Prima qualquer tecla para continuar..." -ForegroundColor DarkGray
+    Write-Host "  Prime qualquer tecla para continuar..." -ForegroundColor DarkGray
     $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
 }
 
@@ -132,12 +134,12 @@ function Draw-Header {
         Start-Sleep -Milliseconds 40
     }
     Write-Host ""
-    $left  = "  Traduções PT-PT desde 2012"
+    $left  = "  Traduções PT-PT desde 2009"
     $right = "v$SCRIPT_VERSION"
     Write-Host ($left.PadRight(52) + $right) -ForegroundColor DarkYellow
     Write-Gap
     Write-Hr
-    $copy  = "  Copyright (C) 2024  João Frade"
+    $copy  = "  Copyright (C) 2026  João Frade"
     $lic   = "GNU GPL v3.0"
     Write-Host ($copy.PadRight(52) + $lic) -ForegroundColor DarkGray
     Write-Hr
@@ -190,28 +192,64 @@ function Load-PackVariables {
         Write-Err "Configuração do pacote não encontrada."
         return $false
     }
+
+    # Reset
+    $script:fileNameWin       = @()
+    $script:fileNameLinux     = @()
+    $script:baseUpLevels      = 0
+    $script:expectedFiles     = @()
+    $script:expectedDirs      = @()
+    $script:filesForRemoval   = @()
+    $script:fileEdit          = @()
+    $script:trLicenseFileName = ""
+    $script:postInstallNote   = ""
+    $script:installCmd        = ""
+    $script:revertCmd         = ""
+    $script:revertNote        = ""
+
     foreach ($line in (Get-Content $configFile -Encoding UTF8)) {
         $line = $line.Trim()
         if (-not $line -or $line.StartsWith(";")) { continue }
-        # Campos de texto livre
-        foreach ($key in @("postInstallNote","installCmd","revertCmd","revertNote")) {
-            if ($line.StartsWith("$key ")) {
-                Set-Variable -Name $key -Value $line.Substring($key.Length + 1) -Scope Script
-                continue
+
+        # Divide em chave e valor (primeira palavra = chave, resto = valor)
+        $spaceIdx = $line.IndexOf(' ')
+        if ($spaceIdx -lt 0) { continue }
+        $key = $line.Substring(0, $spaceIdx).Trim()
+        $val = $line.Substring($spaceIdx + 1).Trim()
+
+        switch ($key) {
+            "fileNameWin"      { $script:fileNameWin     = @($val -split '\|' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+            "fileNameLinux"    { $script:fileNameLinux   = @($val -split '\|' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+            "baseUpLevels"     { $script:baseUpLevels    = [int]$val }
+            "expectedFiles"    { $script:expectedFiles   = @($val -split '\|' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+            "expectedDirs"     { $script:expectedDirs    = @($val -split '\|' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+            "filesForRemoval"  { $script:filesForRemoval = @($val -split '\|' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+            "trLicenseFileName"{ $script:trLicenseFileName = $val }
+            "postInstallNote"  { $script:postInstallNote  = $val }
+            "installCmd"       { $script:installCmd       = $val }
+            "revertCmd"        { $script:revertCmd        = $val }
+            "revertNote"       { $script:revertNote       = $val }
+            "fileEdit" {
+                # formato: fileEdit <ficheiro>|<encoding>|<chave>|<valorRevert>|<valorSet>
+                $parts = $val -split '\|', 5
+                if ($parts.Count -eq 5) {
+                    $script:fileEdit += @([PSCustomObject]@{
+                        file     = $parts[0].Trim()
+                        encoding = $parts[1].Trim()
+                        key      = $parts[2].Trim()
+                        revert   = $parts[3].Trim()
+                        set      = $parts[4].Trim()
+                    })
+                } else {
+                    Write-Warn "fileEdit ignorado (formato inválido): $val"
+                }
             }
         }
-        $parts = $line -split " ", 2
-        if ($parts.Count -ge 1) {
-            $val = if ($parts.Count -eq 2) { $parts[1].Trim() } else { "" }
-            Set-Variable -Name $parts[0].Trim() -Value $val -Scope Script
-        }
     }
-    $required = @("fileName","baseUpLevels","expectedFiles","expectedDirs","filesForRemoval","trLicenseFileName")
-    foreach ($var in $required) {
-        if ($null -eq (Get-Variable -Name $var -Scope Script -ValueOnly -ErrorAction SilentlyContinue)) {
-            Write-Err "Campo obrigatório ausente no pacote: '$var'"
-            return $false
-        }
+
+    if ($script:fileNameWin.Count -eq 0 -and $script:fileNameLinux.Count -eq 0) {
+        Write-Err "Campo obrigatório ausente no pacote: 'fileNameWin' ou 'fileNameLinux'"
+        return $false
     }
     return $true
 }
@@ -280,7 +318,7 @@ function Pack-Choice {
 function Verify-GameDir {
     param([string]$Base)
     $ok = $true
-    foreach ($file in ($expectedFiles -split " ")) {
+    foreach ($file in $expectedFiles) {
         if (-not $file) { continue }
         $path = Join-Path $Base $file
         if (Test-Path $path -PathType Leaf) {
@@ -292,7 +330,7 @@ function Verify-GameDir {
             $ok = $false
         }
     }
-    foreach ($dir in ($expectedDirs -split " ")) {
+    foreach ($dir in $expectedDirs) {
         if (-not $dir) { continue }
         $path = Join-Path $Base $dir
         if (Test-Path $path -PathType Container) {
@@ -310,65 +348,68 @@ function Verify-GameDir {
 function Search-InPath {
     param([string]$SearchRoot, [string]$Context = "instalar")
 
-    $foundFiles = @()
-    try {
-        $foundFiles = Get-ChildItem -Path $SearchRoot -Filter $fileName -Recurse -File -ErrorAction SilentlyContinue |
-            Select-Object -ExpandProperty FullName
-    } catch { return $false }
+    # Tenta cada executável da lista até encontrar um
+    foreach ($exeName in $fileNameWin) {
+        if (-not $exeName) { continue }
+        $foundFiles = @()
+        try {
+            $foundFiles = Get-ChildItem -Path $SearchRoot -Filter $exeName -Recurse -File -ErrorAction SilentlyContinue |
+                Select-Object -ExpandProperty FullName
+        } catch { continue }
 
-    if ($foundFiles.Count -eq 0) { return $false }
-
-    foreach ($foundFile in $foundFiles) {
-        $foundExeDir = Split-Path $foundFile -Parent
-        $base = $foundExeDir
-        for ($l = 0; $l -lt [int]$baseUpLevels; $l++) {
-            $base = Split-Path $base -Parent
-        }
-        $base = $base.TrimEnd("\") + "\"
-
-        $script:errorLog += "Executável encontrado: $foundFile"
-        if ([int]$baseUpLevels -gt 0) {
-            $script:errorLog += "  baseUpLevels=$baseUpLevels → pasta base resolvida: $base"
-        }
-
-        Write-Section "DIRETÓRIO ENCONTRADO"
-        Write-HighlightBox "Executável:" $foundFile
-        if ([int]$baseUpLevels -gt 0) { Write-Gray "  ($baseUpLevels nível(is) acima → $base)" }
-        Write-Gap
-        Write-Gray "A verificar ficheiros e pastas esperados..."
-        Write-Gap
-
-        if (Verify-GameDir $base) {
-            Write-Gap
-            Write-Ok "Todos os ficheiros verificados."
-            Write-Gap
-            if ($Context -eq "desinstalar") {
-                Write-HighlightBox "Desinstalar em:" $base
-                Write-Gap
-                Write-Host "  " -NoNewline; Write-Host "[S]" -ForegroundColor Yellow -NoNewline; Write-Host "  Desinstalar aqui"
-            } else {
-                Write-HighlightBox "Instalar em:" $base
-                Write-Gap
-                Write-Host "  " -NoNewline; Write-Host "[S]" -ForegroundColor Yellow -NoNewline; Write-Host "  Instalar aqui"
+        foreach ($foundFile in $foundFiles) {
+            $foundExeDir = Split-Path $foundFile -Parent
+            $base = $foundExeDir
+            for ($l = 0; $l -lt [int]$baseUpLevels; $l++) {
+                $base = Split-Path $base -Parent
             }
-            Write-Host "  " -NoNewline; Write-Host "[N]" -ForegroundColor Yellow -NoNewline; Write-Host "  Continuar pesquisa"
-            Write-Host "  " -NoNewline; Write-Host "[X]" -ForegroundColor Yellow -NoNewline; Write-Host "  Cancelar"
-            Write-Gap
-            $choice = (Write-Prompt "Opção:").ToLower()
+            $base = $base.TrimEnd("\") + "\"
 
-            switch ($choice) {
-                "s" {
-                    $script:exeDir  = $foundExeDir + "\"
-                    $script:gameDir = $base
-                    return $true
+            $script:errorLog += "Executável encontrado: $foundFile"
+            if ([int]$baseUpLevels -gt 0) {
+                $script:errorLog += "  baseUpLevels=$baseUpLevels → pasta base resolvida: $base"
+            }
+
+            Write-Section "DIRETÓRIO ENCONTRADO"
+            Write-HighlightBox "Executável:" $foundFile
+            if ([int]$baseUpLevels -gt 0) { Write-Gray "  ($baseUpLevels nível(is) acima → $base)" }
+            Write-Gap
+            Write-Gray "A verificar ficheiros e pastas esperados..."
+            Write-Gap
+
+            if (Verify-GameDir $base) {
+                Write-Gap
+                Write-Ok "Todos os ficheiros verificados."
+                Write-Gap
+                if ($Context -eq "desinstalar") {
+                    Write-HighlightBox "Desinstalar em:" $base
+                    Write-Gap
+                    Write-Host "  " -NoNewline; Write-Host "[S]" -ForegroundColor Yellow -NoNewline; Write-Host "  Desinstalar aqui"
+                } else {
+                    Write-HighlightBox "Instalar em:" $base
+                    Write-Gap
+                    Write-Host "  " -NoNewline; Write-Host "[S]" -ForegroundColor Yellow -NoNewline; Write-Host "  Instalar aqui"
                 }
-                "n" { Write-Gray "A continuar pesquisa..."; Write-Gap }
-                default { exit 0 }
+                Write-Host "  " -NoNewline; Write-Host "[N]" -ForegroundColor Yellow -NoNewline; Write-Host "  Continuar pesquisa"
+                Write-Host "  " -NoNewline; Write-Host "[X]" -ForegroundColor Yellow -NoNewline; Write-Host "  Cancelar"
+                Write-Gap
+                $choice = (Write-Prompt "Opção:").ToLower()
+
+                switch ($choice) {
+                    "s" {
+                        $script:exeDir          = $foundExeDir + "\"
+                        $script:gameDir         = $base
+                        $script:resolvedExeName = $exeName
+                        return $true
+                    }
+                    "n" { Write-Gray "A continuar pesquisa..."; Write-Gap }
+                    default { exit 0 }
+                }
+            } else {
+                Write-Gap
+                Write-Warn "Este diretório não parece correto — a continuar pesquisa..."
+                Write-Gap
             }
-        } else {
-            Write-Gap
-            Write-Warn "Este diretório não parece correto — a continuar pesquisa..."
-            Write-Gap
         }
     }
     return $false
@@ -453,10 +494,10 @@ function Create-Backup {
 
 function Backup-RemovalFiles {
     param([string]$BackupDir)
-    if (-not $filesForRemoval) { return }
+    if (-not $filesForRemoval -or $filesForRemoval.Count -eq 0) { return }
     Write-Info "A remover ficheiros conflituantes..."
     Write-Gap
-    foreach ($file in ($filesForRemoval -split " ")) {
+    foreach ($file in $filesForRemoval) {
         if (-not $file) { continue }
         $target = Join-Path ($gameDir.TrimEnd("\")) $file
         if (Test-Path $target -PathType Leaf) {
@@ -620,7 +661,15 @@ function Restore-Backup {
         Write-Warn "Reversão concluída com erros. Verifica o estado do jogo."
     }
 
-    # Passo 3: revertCmd com fallback para revertNote
+    # Passo 3: fileEdit revert + revertCmd com fallback para revertNote
+    if ($fileEdit -and $fileEdit.Count -gt 0) {
+        Write-Gap
+        Write-Hr "DarkYellow"
+        Write-Info "A reverter configurações do jogo..."
+        Write-Gap
+        Revert-FileEdit
+    }
+
     if ($_revertCmd) {
         Write-Gap
         Write-Hr "DarkYellow"
@@ -646,6 +695,76 @@ function Restore-Backup {
     Write-Gap
     Press-AnyKey
     return $true
+}
+
+
+# ════════════════════════════════════════════════════════════
+#  EDIÇÃO DECLARATIVA DE FICHEIROS (fileEdit)
+# ════════════════════════════════════════════════════════════
+
+function Get-FileEncoding {
+    param([string]$FilePath)
+    # Detecta BOM ou assume UTF-8; para ficheiros de configuração antigos usa latin1
+    $bytes = [System.IO.File]::ReadAllBytes($FilePath)
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { return "UTF-8-BOM" }
+    if ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) { return "UTF-16LE" }
+    if ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) { return "UTF-16BE" }
+    return $null   # sem BOM — o chamador usa o encoding especificado no JSON ou tenta UTF-8
+}
+
+function Resolve-Encoding {
+    param([string]$FilePath, [string]$HintEncoding)
+    if ($HintEncoding) {
+        switch ($HintEncoding.ToLower()) {
+            "latin1"  { return [System.Text.Encoding]::GetEncoding("iso-8859-1") }
+            "utf-8"   { return [System.Text.Encoding]::UTF8 }
+            "utf8"    { return [System.Text.Encoding]::UTF8 }
+            default   { return [System.Text.Encoding]::GetEncoding($HintEncoding) }
+        }
+    }
+    $bom = Get-FileEncoding $FilePath
+    if ($bom -eq "UTF-8-BOM") { return [System.Text.Encoding]::UTF8 }
+    return [System.Text.Encoding]::UTF8   # fallback seguro
+}
+
+function Apply-SingleFileEdit {
+    param([string]$GamePath, [object]$Edit, [bool]$Revert = $false)
+    $filePath = Join-Path $GamePath $Edit.file
+    if (-not (Test-Path $filePath -PathType Leaf)) {
+        Write-Warn "fileEdit: ficheiro não encontrado — $($Edit.file)"
+        return
+    }
+    $enc   = Resolve-Encoding $filePath $Edit.encoding
+    $text  = [System.IO.File]::ReadAllText($filePath, $enc)
+    $key   = $Edit.key
+    $value = if ($Revert) { $Edit.revert } else { $Edit.set }
+
+    $pattern     = "(?m)^(\s*${key}\s*=\s*).*$"
+    $replacement = "`${1}${value}"
+    $newText = [regex]::Replace($text, $pattern, $replacement)
+    if ($newText -ne $text) {
+        [System.IO.File]::WriteAllText($filePath, $newText, $enc)
+        $verb = if ($Revert) { "revertido" } else { "definido" }
+        Write-Ok "fileEdit: ${key} ${verb} → ${value}  ($($Edit.file))"
+    } else {
+        Write-Warn "fileEdit: chave não encontrada — ${key}  ($($Edit.file))"
+    }
+}
+
+function Apply-FileEdit {
+    if (-not $fileEdit -or $fileEdit.Count -eq 0) { return }
+    $gamePath = $gameDir.TrimEnd("\")
+    foreach ($edit in $fileEdit) {
+        Apply-SingleFileEdit $gamePath $edit $false
+    }
+}
+
+function Revert-FileEdit {
+    if (-not $fileEdit -or $fileEdit.Count -eq 0) { return }
+    $gamePath = $gameDir.TrimEnd("\")
+    foreach ($edit in $fileEdit) {
+        Apply-SingleFileEdit $gamePath $edit $true
+    }
 }
 
 
@@ -689,7 +808,15 @@ function Copy-Files {
         return
     }
 
-    # installCmd com fallback para postInstallNote
+    # fileEdit — edição declarativa de ficheiros de configuração do jogo
+    if ($fileEdit -and $fileEdit.Count -gt 0) {
+        Write-Gap
+        Write-Info "A aplicar configurações ao jogo..."
+        Write-Gap
+        Apply-FileEdit
+    }
+
+    # installCmd — escape hatch para casos não cobertos por fileEdit
     if ($installCmd) {
         Write-Gap
         Write-Info "A configurar o jogo..."
@@ -813,11 +940,11 @@ function Generate-ErrorReport {
         "  Pacote:            $packName",
         "",
         "  Parâmetros do pacote (.autoinstalacao):",
-        "    fileName:        $fileName",
+        "    fileNameWin:     $($fileNameWin -join ', ')",
         "    baseUpLevels:    $baseUpLevels",
-        "    expectedFiles:   $expectedFiles",
-        "    expectedDirs:    $expectedDirs",
-        "    filesForRemoval: $filesForRemoval",
+        "    expectedFiles:   $($expectedFiles -join ', ')",
+        "    expectedDirs:    $($expectedDirs -join ', ')",
+        "    filesForRemoval: $($filesForRemoval -join ', ')",
         "",
         "  Dir instalador:    $SCRIPT_DIR",
         "  Dir jogo:          $(if ($gameDir) { $gameDir } else { 'não encontrado' })",
@@ -1034,7 +1161,7 @@ function End-Menu {
     $notesFile = Join-Path $SCRIPT_DIR $FILE_NOTES
     $packNotes = if ($packName) { Join-Path $SCRIPT_DIR "$packName\$SP_FOLDER\$FILE_NOTES" } else { "" }
     $licFile   = if ($packName) { Join-Path $SCRIPT_DIR "$packName\$SP_FOLDER\$trLicenseFileName" } else { "" }
-    $exeFile   = if ($exeDir)   { Join-Path $exeDir $fileName } else { "" }
+    $exeFile   = if ($exeDir -and $resolvedExeName) { Join-Path $exeDir $resolvedExeName } else { "" }
     $backupDir = if ($gameDir)  { Join-Path $gameDir $BACKUP_PATH } else { "" }
     $hasBackup = $backupDir -and (Test-Path $backupDir -PathType Container)
 

@@ -4,7 +4,7 @@
 #  AUTOINSTALADOR 100NOME
 #  Copyright (C) 2026  João Frade
 #  Licenciado sob a GNU General Public License v3.0
-#  https://100nome.netlify.app
+#  https://100nome.net
 # ============================================================
 
 export LANG=pt_PT.UTF-8
@@ -22,7 +22,7 @@ CYAN='\033[0;36m'           # ciano — progresso / info
 NC='\033[0m'                # reset
 
 # ── Constantes ───────────────────────────────────────────────
-readonly SCRIPT_VERSION="2.0.1"
+readonly SCRIPT_VERSION="2.1.0"
 readonly SP_FOLDER="_100NOME"
 readonly PACK_START="Pacote 100Nome"
 readonly PACK_DEFAULT="pacote normal"
@@ -31,29 +31,34 @@ readonly FILE_HELP="INSTALAR.html"
 readonly FILE_CONFIG=".autoinstalacao"
 readonly BACKUP_PATH="${SP_FOLDER}/original"
 readonly BACKUP_PARTIAL_SUFFIX=" - parcial"
-readonly SITE_BASE="https://100nome.netlify.app"
+readonly SITE_BASE="https://100nome.net"
 readonly DISCORD_URL="https://discord.gg/Xv7ax2VkEp"
 
 # ── Variáveis de estado ──────────────────────────────────────
 gameName=""
-fileName=""
+fileNameWin=()      # array de executáveis Windows
+fileNameLinux=()    # array de executáveis Linux (bit executável)
 baseUpLevels=0
-expectedFiles=""
-expectedDirs=""
-filesForRemoval=""
+expectedFiles=()
+expectedDirs=()
+filesForRemoval=()
+fileEdit=()         # array de linhas fileEdit do .autoinstalacao
 urlEnd=""
 trLicenseFileName=""
 packName=""
 exeDir=""
 gameDir=""
+resolvedExeName=""  # executável efectivamente encontrado
 packList=()
 dirsToSearch="/ /home /media /mnt /opt /usr/local/games"
 performBackup=1
 installed=0
 postInstallNote=""
 installCmd=""
-error_log=()              # registo de eventos para o ficheiro de erro
-SCRIPT_DIR=""             # definido em main() após cd
+revertCmd=""
+revertNote=""
+error_log=()
+SCRIPT_DIR=""
 
 
 # ════════════════════════════════════════════════════════════
@@ -97,7 +102,7 @@ prompt() {
 # Prompt de tecla simples
 press_any_key() {
     gap
-    echo -e "  ${GRAY}Prima qualquer tecla para continuar...${NC}"
+    echo -e "  ${GRAY}Prime qualquer tecla para continuar...${NC}"
     read -r -n 1 -s
 }
 
@@ -135,11 +140,11 @@ draw_header() {
 
     # Subtítulo e versão
     printf "  ${GOLD_DIM}%-46s${GRAY}v%s${NC}\n" \
-        "Traduções PT-PT desde 2012" "$SCRIPT_VERSION"
+        "Traduções PT-PT desde 2009" "$SCRIPT_VERSION"
     gap
     hr
     printf "  ${GRAY}%-40s%s${NC}\n" \
-        "Copyright (C) 2024  João Frade" \
+        "Copyright (C) 2026  João Frade" \
         "GNU GPL v3.0"
     hr
     gap
@@ -186,35 +191,67 @@ load_variables() {
 
 load_pack_variables() {
     local config_file="$packName/$FILE_CONFIG"
-    local required="fileName baseUpLevels expectedFiles expectedDirs filesForRemoval trLicenseFileName"
 
     if [[ ! -f "$config_file" ]]; then
         msg_err "Configuração do pacote não encontrada: '$config_file'"
         return 1
     fi
 
+    # Reset
+    fileNameWin=()
+    fileNameLinux=()
+    baseUpLevels=0
+    expectedFiles=()
+    expectedDirs=()
+    filesForRemoval=()
+    fileEdit=()
+    trLicenseFileName=""
+    postInstallNote=""
+    installCmd=""
+    revertCmd=""
+    revertNote=""
+
     while IFS= read -r line || [[ -n "$line" ]]; do
-        # postInstallNote pode ter espaços — lê tudo após a chave
-        if [[ "$line" == postInstallNote\ * ]]; then
-            postInstallNote="${line#postInstallNote }"
-            continue
-        fi
-        # Para todas as outras variáveis: primeira palavra = chave, resto = valor
-        local key value
-        key="${line%% *}"
-        value="${line#* }"
-        [[ "$key" == "$value" ]] && value=""   # linha com só uma palavra, sem valor
-        key=$(echo "$key" | xargs)
-        value=$(echo "$value" | xargs)
-        [[ -n "$key" ]] && declare -g "$key=$value"
+        line="${line#"${line%%[![:space:]]*}"}"  # trim esquerdo
+        [[ -z "$line" || "$line" == \;* ]] && continue
+
+        local key="${line%% *}"
+        local val="${line#* }"
+        [[ "$key" == "$val" ]] && val=""  # linha sem valor
+
+        case "$key" in
+            fileNameWin)
+                IFS='|' read -ra fileNameWin <<< "$val" ;;
+            fileNameLinux)
+                IFS='|' read -ra fileNameLinux <<< "$val" ;;
+            baseUpLevels)
+                baseUpLevels="$val" ;;
+            expectedFiles)
+                IFS='|' read -ra expectedFiles <<< "$val" ;;
+            expectedDirs)
+                IFS='|' read -ra expectedDirs <<< "$val" ;;
+            filesForRemoval)
+                IFS='|' read -ra filesForRemoval <<< "$val" ;;
+            trLicenseFileName)
+                trLicenseFileName="$val" ;;
+            postInstallNote)
+                postInstallNote="$val" ;;
+            installCmd)
+                installCmd="$val" ;;
+            revertCmd)
+                revertCmd="$val" ;;
+            revertNote)
+                revertNote="$val" ;;
+            fileEdit)
+                # formato: fileEdit <ficheiro>|<encoding>|<chave>|<valorRevert>|<valorSet>
+                fileEdit+=("$val") ;;
+        esac
     done < "$config_file"
 
-    for var in $required; do
-        if [[ -z "${!var+x}" ]]; then
-            msg_err "Campo obrigatório ausente no pacote: '$var'"
-            return 1
-        fi
-    done
+    if [[ ${#fileNameWin[@]} -eq 0 && ${#fileNameLinux[@]} -eq 0 ]]; then
+        msg_err "Campo obrigatório ausente: 'fileNameWin' ou 'fileNameLinux'"
+        return 1
+    fi
 
     return 0
 }
@@ -295,7 +332,8 @@ _verify_game_dir() {
     local base="$1"
     local ok=1
 
-    for file in $expectedFiles; do
+    for file in "${expectedFiles[@]}"; do
+        [[ -z "$file" ]] && continue
         if [[ -f "${base}${file}" ]]; then
             msg_ok "${GRAY}${file}${NC}"
             error_log+=("  ENCONTRADO (ficheiro): ${base}${file}")
@@ -306,7 +344,8 @@ _verify_game_dir() {
         fi
     done
 
-    for dir in $expectedDirs; do
+    for dir in "${expectedDirs[@]}"; do
+        [[ -z "$dir" ]] && continue
         if [[ -d "${base}${dir}" ]]; then
             msg_ok "${GRAY}${dir}/${NC}"
             error_log+=("  ENCONTRADO (pasta): ${base}${dir}")
@@ -322,76 +361,109 @@ _verify_game_dir() {
 
 _search_in_path() {
     local search_root="$1"
-    local context="${2:-instalar}"   # "instalar" ou "desinstalar"
+    local context="${2:-instalar}"
 
-    # Recolhe TODOS os resultados primeiro num array —
-    # evita que o read do prompt leia do pipe do find em vez do teclado
-    local -a found_files=()
-    while IFS= read -r -d '' f; do
-        found_files+=("$f")
-    done < <(find "$search_root" -name "$fileName" -type f -print0 2>/dev/null)
+    # Determina candidatos: Linux nativo tem prioridade; Wine como fallback
+    local -a candidates=()
+    local use_wine=0
 
-    [[ ${#found_files[@]} -eq 0 ]] && return 1
-
-    # Agora itera sobre o array — stdin está livre para o teclado
-    for found_file in "${found_files[@]}"; do
-        local found_exe_dir
-        found_exe_dir="$(dirname "$found_file")/"
-
-        local base="$found_exe_dir"
-        base="${base%/}"
-        for ((l=1; l<=baseUpLevels; l++)); do
-            base="$(dirname "$base")"
+    if [[ ${#fileNameLinux[@]} -gt 0 ]]; then
+        # Recolhe executáveis Linux com bit executável
+        local -a linux_found=()
+        for lname in "${fileNameLinux[@]}"; do
+            [[ -z "$lname" ]] && continue
+            while IFS= read -r -d '' f; do
+                [[ -x "$f" ]] && linux_found+=("$(basename "$f")")
+            done < <(find "$search_root" -name "$lname" -type f -print0 2>/dev/null)
         done
-        base="${base}/"
-
-        error_log+=("Executável encontrado: $found_file")
-        [[ $baseUpLevels -gt 0 ]] &&             error_log+=("  baseUpLevels=${baseUpLevels} → pasta base resolvida: ${base}")
-
-        section "DIRETÓRIO ENCONTRADO"
-        highlight_box "Executável:" "$found_file"
-        [[ $baseUpLevels -gt 0 ]] &&             msg_gray "  (${baseUpLevels} nível(is) acima → ${base})"
-        gap
-        echo -e "  ${GRAY}A verificar ficheiros e pastas esperados...${NC}"
-        gap
-
-        if _verify_game_dir "$base"; then
-            gap
-            msg_ok "Todos os ficheiros verificados."
-            gap
-            if [[ "$context" == "desinstalar" ]]; then
-                highlight_box "Desinstalar em:" "$base"
-                gap
-                echo -e "  ${GOLD}[S]${NC}  Desinstalar aqui"
-            else
-                highlight_box "Instalar em:" "$base"
-                gap
-                echo -e "  ${GOLD}[S]${NC}  Instalar aqui"
-            fi
-            echo -e "  ${GOLD}[N]${NC}  Continuar pesquisa"
-            echo -e "  ${GOLD}[X]${NC}  Cancelar"
-            gap
-            prompt "Opção:" choice
-
-            case "${choice,,}" in
-                s)
-                    exeDir="$found_exe_dir"
-                    gameDir="$base"
-                    return 0
-                    ;;
-                n)
-                    msg_gray "A continuar pesquisa..."
-                    gap
-                    ;;
-                *)
-                    exit 0
-                    ;;
-            esac
-        else
-            gap
-            msg_warn "Este diretório não parece correto — a continuar pesquisa..."
-            gap
+        if [[ ${#linux_found[@]} -gt 0 ]]; then
+            candidates=("${linux_found[@]}")
+            use_wine=0
+        elif [[ ${#fileNameWin[@]} -gt 0 ]]; then
+            candidates=("${fileNameWin[@]}")
+            use_wine=1
         fi
+    elif [[ ${#fileNameWin[@]} -gt 0 ]]; then
+        candidates=("${fileNameWin[@]}")
+        use_wine=0
+    fi
+
+    [[ ${#candidates[@]} -eq 0 ]] && return 1
+
+    for exeName in "${candidates[@]}"; do
+        [[ -z "$exeName" ]] && continue
+
+        local -a found_files=()
+        while IFS= read -r -d '' f; do
+            found_files+=("$f")
+        done < <(find "$search_root" -name "$exeName" -type f -print0 2>/dev/null)
+
+        [[ ${#found_files[@]} -eq 0 ]] && continue
+
+        for found_file in "${found_files[@]}"; do
+            local found_exe_dir
+            found_exe_dir="$(dirname "$found_file")/"
+
+            local base="$found_exe_dir"
+            base="${base%/}"
+            for ((l=1; l<=baseUpLevels; l++)); do
+                base="$(dirname "$base")"
+            done
+            base="${base}/"
+
+            error_log+=("Executável encontrado: $found_file")
+            [[ $baseUpLevels -gt 0 ]] && \
+                error_log+=("  baseUpLevels=${baseUpLevels} → pasta base resolvida: ${base}")
+
+            section "DIRETÓRIO ENCONTRADO"
+            highlight_box "Executável:" "$found_file"
+            [[ $use_wine -eq 1 ]] && msg_warn "Executável Windows — será lançado via Wine"
+            [[ $baseUpLevels -gt 0 ]] && \
+                msg_gray "  (${baseUpLevels} nível(is) acima → ${base})"
+            gap
+            echo -e "  ${GRAY}A verificar ficheiros e pastas esperados...${NC}"
+            gap
+
+            if _verify_game_dir "$base"; then
+                gap
+                msg_ok "Todos os ficheiros verificados."
+                gap
+                if [[ "$context" == "desinstalar" ]]; then
+                    highlight_box "Desinstalar em:" "$base"
+                    gap
+                    echo -e "  ${GOLD}[S]${NC}  Desinstalar aqui"
+                else
+                    highlight_box "Instalar em:" "$base"
+                    gap
+                    echo -e "  ${GOLD}[S]${NC}  Instalar aqui"
+                fi
+                echo -e "  ${GOLD}[N]${NC}  Continuar pesquisa"
+                echo -e "  ${GOLD}[X]${NC}  Cancelar"
+                gap
+                prompt "Opção:" choice
+
+                case "${choice,,}" in
+                    s)
+                        exeDir="$found_exe_dir"
+                        gameDir="$base"
+                        resolvedExeName="$exeName"
+                        resolvedExeWine=$use_wine
+                        return 0
+                        ;;
+                    n)
+                        msg_gray "A continuar pesquisa..."
+                        gap
+                        ;;
+                    *)
+                        exit 0
+                        ;;
+                esac
+            else
+                gap
+                msg_warn "Este diretório não parece correto — a continuar pesquisa..."
+                gap
+            fi
+        done
     done
 
     return 1
@@ -512,11 +584,12 @@ create_backup() {
 
 _backup_removal_files() {
     local backup_dir="$1"
-    [[ -z "$filesForRemoval" ]] && return
+    [[ ${#filesForRemoval[@]} -eq 0 ]] && return
 
     msg_info "A remover ficheiros conflituantes..."
     gap
-    for file in $filesForRemoval; do
+    for file in "${filesForRemoval[@]}"; do
+        [[ -z "$file" ]] && continue
         local target="${gameDir}${file}"
         local backup="${backup_dir}/${file}"
         [[ -f "$target" ]] && _move_to_backup "$target" "$backup"
@@ -702,7 +775,15 @@ restore_backup() {
         msg_warn "Reversão concluída com erros. Verifica o estado do jogo."
     fi
 
-    # Passo 3: revertCmd com fallback para revertNote
+    # Passo 3: fileEdit revert + revertCmd com fallback para revertNote
+    if [[ ${#fileEdit[@]} -gt 0 ]]; then
+        gap
+        hr "$GOLD_DIM"
+        msg_info "A reverter configurações do jogo..."
+        gap
+        apply_file_edit "revert"
+    fi
+
     if [[ -n "$_revertCmd" ]]; then
         gap
         hr "$GOLD_DIM"
@@ -744,6 +825,85 @@ restore_backup() {
 }
 
 # ════════════════════════════════════════════════════════════
+#  EDIÇÃO DECLARATIVA DE FICHEIROS (fileEdit)
+# ════════════════════════════════════════════════════════════
+
+# apply_file_edit <mode: set|revert>
+# Processa o array global fileEdit[]. Cada entrada tem o formato:
+#   <ficheiro>|<encoding>|<chave>|<valorRevert>|<valorSet>
+apply_file_edit() {
+    local mode="${1:-set}"
+    [[ ${#fileEdit[@]} -eq 0 ]] && return
+
+    local game_path="${gameDir%/}"
+
+    for entry in "${fileEdit[@]}"; do
+        IFS='|' read -r fe_file fe_enc fe_key fe_revert fe_set <<< "$entry"
+        fe_file="${fe_file// /}"  # trim
+        fe_key="${fe_key// /}"
+
+        local file_path="${game_path}/${fe_file}"
+        if [[ ! -f "$file_path" ]]; then
+            msg_warn "fileEdit: ficheiro não encontrado — ${fe_file}"
+            continue
+        fi
+
+        local value
+        if [[ "$mode" == "revert" ]]; then
+            value="$fe_revert"
+        else
+            value="$fe_set"
+        fi
+
+        # Determina encoding: hint ou detecção por BOM
+        local enc="$fe_enc"
+        if [[ -z "$enc" ]]; then
+            local bom
+            bom=$(head -c 3 "$file_path" | od -An -tx1 | tr -d ' \n')
+            if [[ "$bom" == efbbbf* ]]; then
+                enc="utf-8-sig"
+            else
+                enc="utf-8"
+            fi
+        fi
+
+        # Edita o ficheiro via python3 (para lidar com encoding correctamente)
+        python3 - "$file_path" "$enc" "$fe_key" "$value" "$mode" << 'PYEOF'
+import sys, re
+
+file_path = sys.argv[1]
+enc       = sys.argv[2]
+key       = sys.argv[3]
+value     = sys.argv[4]
+mode      = sys.argv[5]
+
+try:
+    with open(file_path, "r", encoding=enc, errors="replace") as f:
+        text = f.read()
+except Exception as e:
+    print(f"  \033[31m✘\033[0m  fileEdit: erro ao ler — {e}")
+    sys.exit(1)
+
+pattern  = rf"(?m)^(\s*{re.escape(key)}\s*=\s*).*$"
+new_text, n = re.subn(pattern, rf"\g<1>{value}", text)
+
+if n > 0:
+    try:
+        with open(file_path, "w", encoding=enc) as f:
+            f.write(new_text)
+        verb = "revertido" if mode == "revert" else "definido"
+        print(f"  \033[0;32m✔\033[0m  fileEdit: {key} {verb} → {value}  ({sys.argv[1].split('/')[-1]})")
+    except Exception as e:
+        print(f"  \033[31m✘\033[0m  fileEdit: erro ao escrever — {e}")
+        sys.exit(1)
+else:
+    print(f"  \033[1;33m⚠\033[0m  fileEdit: chave não encontrada — {key}  ({sys.argv[1].split('/')[-1]})")
+PYEOF
+    done
+}
+
+
+# ════════════════════════════════════════════════════════════
 #  INSTALAÇÃO
 # ════════════════════════════════════════════════════════════
 
@@ -768,7 +928,15 @@ copy_files() {
         return
     fi
 
-    # installCmd — configuração automática pós-cópia (ex: mudar idioma no .ini)
+    # fileEdit — edição declarativa de ficheiros de configuração do jogo
+    if [[ ${#fileEdit[@]} -gt 0 ]]; then
+        gap
+        msg_info "A aplicar configurações ao jogo..."
+        gap
+        apply_file_edit "set"
+    fi
+
+    # installCmd — escape hatch para casos não cobertos por fileEdit
     if [[ -n "$installCmd" ]]; then
         gap
         msg_info "A configurar o jogo..."
@@ -859,7 +1027,7 @@ end_menu() {
     if [[ $installed -eq 1 ]]; then
         [[ -d "$gameDir" ]] && \
             echo -e "  ${GOLD}[P]${NC}   Abrir pasta do jogo"
-        [[ -f "${exeDir}${fileName}" ]] && \
+        [[ -n "$resolvedExeName" && -f "${exeDir}${resolvedExeName}" ]] && \
             echo -e "  ${GOLD}[J]${NC}   Iniciar jogo"
     fi
 
@@ -901,7 +1069,7 @@ end_menu() {
                 [[ $installed -eq 1 && -d "$gameDir" ]] && _open_file "$gameDir"
                 ;;
             j)
-                if [[ $installed -eq 1 && -f "${exeDir}${fileName}" ]]; then
+                if [[ $installed -eq 1 && -n "$resolvedExeName" && -f "${exeDir}${resolvedExeName}" ]]; then
                     cd "$exeDir" || return
                     gap
                     msg_info "A lançar ${WHITE}${gameName}${NC}..."
@@ -914,12 +1082,19 @@ end_menu() {
                     [[ -n "$urlEnd" ]] && _open_file "${SITE_BASE}/${urlEnd}?source=installer&played=1&os=linux" &
 
                     # Corre o jogo — bloqueia até o utilizador fechar
-                    if [[ -x "${exeDir}${fileName}" ]]; then
-                        "./${fileName}"
+                    if [[ ${resolvedExeWine:-0} -eq 1 ]]; then
+                        # Executável Windows via Wine
+                        if command -v wine &>/dev/null; then
+                            wine "./${resolvedExeName}"
+                        else
+                            msg_warn "Wine não encontrado. Instala o Wine para lançar este jogo."
+                            press_any_key
+                        fi
+                    elif [[ -x "${exeDir}${resolvedExeName}" ]]; then
+                        "./${resolvedExeName}"
                     else
-                        # Tenta via xdg-open mas espera (não usa &)
-                        xdg-open "${exeDir}${fileName}" 2>/dev/null                             || open "${exeDir}${fileName}" 2>/dev/null
-                        # Pausa para o utilizador ver a saída do lançador
+                        xdg-open "${exeDir}${resolvedExeName}" 2>/dev/null \
+                            || open "${exeDir}${resolvedExeName}" 2>/dev/null
                         press_any_key
                     fi
 
@@ -1243,11 +1418,12 @@ generate_error_report() {
         echo "  Pacote:            ${packName:-desconhecido}"
         echo ""
         echo "  Parâmetros do pacote (.autoinstalacao):"
-        echo "    fileName:        ${fileName:-desconhecido}"
+        echo "    fileNameWin:     ${fileNameWin[*]:-desconhecido}"
+        echo "    fileNameLinux:   ${fileNameLinux[*]:-nenhum}"
         echo "    baseUpLevels:    ${baseUpLevels}"
-        echo "    expectedFiles:   ${expectedFiles:-nenhum}"
-        echo "    expectedDirs:    ${expectedDirs:-nenhum}"
-        echo "    filesForRemoval: ${filesForRemoval:-nenhum}"
+        echo "    expectedFiles:   ${expectedFiles[*]:-nenhum}"
+        echo "    expectedDirs:    ${expectedDirs[*]:-nenhum}"
+        echo "    filesForRemoval: ${filesForRemoval[*]:-nenhum}"
         echo ""
         echo "  Dir instalador:    ${SCRIPT_DIR:-desconhecido}"
         echo "  Dir jogo:          ${gameDir:-não encontrado}"
